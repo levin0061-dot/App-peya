@@ -1,0 +1,4 @@
+<resources>
+    <string name="desc">Lee el pago y los km de los pedidos que ves en pantalla y te muestra un cartel verde o rojo según tus números. No guarda ni envía datos.</string>
+    <color name="ic_bg">#E11D48</color>
+</resources>
