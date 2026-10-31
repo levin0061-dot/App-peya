@@ -413,7 +413,7 @@ class OverlayService : AccessibilityService() {
             moneyRx.find(t)?.let { pay = num(it.groupValues[1]) }
             if (pay != null) break
         }
-        val p = pay ?: run { hide(); return }
+        val p = pay ?: run { diag(texts); return }
 
         var kms = 0.0
         var mins = 0.0
@@ -539,7 +539,34 @@ class OverlayService : AccessibilityService() {
         u.save.alpha = if (saved) 0.6f else 1f
     }
 
-    private fun hide() {
+      private fun diag(texts: List<String>) {
+        cur = null
+        val u = ui ?: run {
+            val n = buildUi()
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(48) }
+            try { wm?.addView(n.box, lp) } catch (_: Exception) { return }
+            ui = n
+            n
+        }
+        val amber = Color.parseColor("#FBBF24")
+        u.bg.setStroke(dp(2), amber)
+        u.verdict.text = "🔍 No encuentro el pago"
+        u.verdict.setTextColor(amber)
+        u.pay.text = "${texts.size} textos leídos"
+        u.sub.text = texts.take(12).joinToString(" | ").take(350)
+        u.net.text = "–"
+        u.km.text = "–"
+        u.hour.text = "–"
+        u.fails.visibility = View.GONE
+        u.save.text = "Sacá captura y mandásela a Claude"
+        u.save.alpha = 0.6f
+      }  private fun hide() {
         ui?.let { try { wm?.removeView(it.box) } catch (_: Exception) {} }
         ui = null
         cur = null
