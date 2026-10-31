@@ -3,4 +3,5 @@
     android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canRetrieveWindowContent="true"
-    android:notificationTimeout="300" />
+    android:notificationTimeout="300"
+    android:description="@string/desc" />
