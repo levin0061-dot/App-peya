@@ -1,29 +1,21 @@
 package com.repartidor.rentable
 
-import android.accessibilityservice.AccessibilityService
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
-import android.os.SystemClock
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
-import android.util.Log
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
-import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.*
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -51,6 +43,14 @@ fun evaluate(pay: Double, kms: Double, mins: Double, p: SharedPreferences, zone:
     if (mins > 0 && minHour > 0 && perHour < minHour) f.add("ganancia por hora")
     if (zone != null) f.add("zona a evitar ($zone)")
     return Eval(net, perKm, perHour, f)
+}
+
+// Pago mínimo que tendría que tener un pedido de esos km para cumplir tus mínimos.
+fun neededPay(kms: Double, p: SharedPreferences): Double {
+    val cost = p.getFloat("cost", 0f)
+    val minNet = p.getFloat("minNet", 0f)
+    val minKm = p.getFloat("minKm", 0f)
+    return maxOf(minNet + kms * cost, kms * (minKm + cost))
 }
 
 fun money(x: Double): String = "$" + "%,.0f".format(x)
@@ -183,6 +183,11 @@ class MainActivity : Activity() {
         }
         page.addView(tv("Repartidor Rentable", 26f, INK, true))
         page.addView(tv("Sabé al instante si un pedido te conviene.", 15f, MUT), lp(4))
+        page.addView(
+            btn("⚙️ Configuración (cartel y sonido)", SOFT, INK) {
+                startActivity(Intent(this, SettingsActivity::class.java))
+            }, lp(14)
+        )
 
         // Estado del servicio
         val st = card(page)
@@ -215,7 +220,9 @@ class MainActivity : Activity() {
         field(cf, "Costo por km", "Nafta + desgaste de la moto, por cada km.", "cost")
         field(cf, "Ganancia mínima por pedido", "Lo mínimo que querés ganar, ya descontado el costo.", "minNet")
         field(cf, "Ganancia mínima por km", "Lo mínimo que querés ganar por cada km.", "minKm")
-        field(cf, "Ganancia mínima por hora", "Usa los minutos del pedido. Dejalo en 0 para ignorarlo.", "minHour")
+        field(cf, "Ganancia mínima por hora", "Usa los minutos del pedido, si la app los muestra. Dejalo en 0 para ignorarlo.", "minHour")
+        field(cf, "Tarifa base por pedido (opcional)", "Si la app no muestra el pago, se estima con: base + tarifa por km.", "rateBase")
+        field(cf, "Tarifa por km (opcional)", "Cuánto te pagan aproximadamente por cada km.", "rateKm")
         field(cf, "Zonas a evitar", "Barrios o palabras separados por coma. Si aparecen en el pedido, avisa.", "zones", false)
 
         // Vista previa
@@ -255,7 +262,7 @@ class MainActivity : Activity() {
         val hp = card(page)
         hp.addView(tv("Cómo usarla", 18f, INK, true))
         hp.addView(
-            tv("1. Cargá tus números.\n2. Activá el servicio.\n3. Abrí la app de pedidos: cuando te llegue un pedido vas a ver el cartel arriba, verde si conviene y rojo si no.\n4. Si aceptás el pedido, tocá «＋ Lo acepté» en el cartel para sumarlo al historial.", 14f, MUT),
+            tv("1. Cargá tus números.\n2. Activá el servicio.\n3. Abrí la app de pedidos: cuando te llegue un pedido vas a ver el cartel arriba.\n4. Si la app muestra el pago, el cartel dice verde o rojo. Si no lo muestra, te dice «Aceptá si pagan más de $X» con tus números (o un estimado, si cargaste las tarifas).\n5. Si aceptás el pedido y el cartel tiene el botón «＋ Lo acepté», tocalo para sumarlo al historial.\n6. En ⚙️ Configuración cambiás cómo se ve el cartel y el sonido.", 14f, MUT),
             lp(6)
         )
         hp.addView(tv("Si el cartel deja de aparecer, poné esta app en «Sin restricciones» en los ajustes de batería.", 13f, MUT), lp(10))
@@ -338,241 +345,4 @@ class MainActivity : Activity() {
             )
         }
     }
-}
-
-class Ui(
-    val box: LinearLayout, val bg: GradientDrawable,
-    val verdict: TextView, val pay: TextView, val sub: TextView,
-    val net: TextView, val km: TextView, val hour: TextView,
-    val fails: TextView, val save: TextView
-)
-
-class OverlayService : AccessibilityService() {
-
-    // Solo lee apps cuyo paquete contenga esto.
-    private val targetPkg = "pedidosya"
-
-    private var wm: WindowManager? = null
-    private var ui: Ui? = null
-    private var last = 0L
-    private var cur: Rec? = null
-    private var curSig = ""
-    private var savedSig = ""
-
-    private val moneyRx = Regex("""\$\s?(\d[\d.,]*)""")
-    private val kmRx = Regex("""(\d+(?:[.,]\d+)?)\s?km""", RegexOption.IGNORE_CASE)
-    private val minRx = Regex("""(\d+)\s?min""", RegexOption.IGNORE_CASE)
-    private val payHint = Regex("ganancia|pago|cobr|recibir|total", RegexOption.IGNORE_CASE)
-
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-    override fun onServiceConnected() {
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
-    }
-
-    override fun onAccessibilityEvent(e: AccessibilityEvent) {
-        val pkg = e.packageName?.toString() ?: return
-        if (pkg == packageName) return
-        if (!pkg.contains(targetPkg, true)) { hide(); return }
-
-        val now = SystemClock.uptimeMillis()
-        if (now - last < 600) return
-        last = now
-
-        val root = rootInActiveWindow ?: return
-        val texts = ArrayList<String>()
-        collect(root, texts)
-        Log.d("RR", texts.joinToString(" | "))
-        analyze(texts)
-    }
-
-    private fun collect(n: AccessibilityNodeInfo?, out: MutableList<String>) {
-        if (n == null) return
-        (n.text ?: n.contentDescription)?.toString()?.let { if (it.isNotBlank()) out.add(it) }
-        for (i in 0 until n.childCount) collect(n.getChild(i), out)
-    }
-
-    private fun num(s: String): Double? {
-        var t = s.trim().trimEnd('.', ',')
-        t = when {
-            t.contains('.') && t.contains(',') -> t.replace(".", "").replace(',', '.')
-            t.contains(',') -> if (t.substringAfter(',').length == 3) t.replace(",", "") else t.replace(',', '.')
-            t.contains('.') -> if (t.substringAfter('.').length == 3) t.replace(".", "") else t
-            else -> t
-        }
-        return t.toDoubleOrNull()
-    }
-
-    private fun analyze(texts: List<String>) {
-        var pay: Double? = null
-        for (t in texts) if (payHint.containsMatchIn(t)) {
-            moneyRx.find(t)?.let { pay = num(it.groupValues[1]) }
-            if (pay != null) break
-        }
-        if (pay == null) for (t in texts) {
-            moneyRx.find(t)?.let { pay = num(it.groupValues[1]) }
-            if (pay != null) break
-        }
-        val p = pay ?: run { diag(texts); return }
-
-        var kms = 0.0
-        var mins = 0.0
-        for (t in texts) {
-            kmRx.findAll(t).forEach { kms += num(it.groupValues[1]) ?: 0.0 }
-            minRx.findAll(t).forEach { mins += it.groupValues[1].toDoubleOrNull() ?: 0.0 }
-        }
-
-        val cfg = getSharedPreferences("cfg", MODE_PRIVATE)
-        val zones = (cfg.getString("zones", "") ?: "").split(",")
-            .map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-        val blob = texts.joinToString(" ").lowercase()
-        val zoneHit = zones.firstOrNull { blob.contains(it) }
-
-        val r = evaluate(p, kms, mins, cfg, zoneHit)
-        cur = Rec(System.currentTimeMillis(), p, kms, mins, r.net)
-        curSig = "$p|$kms|$mins"
-        show(p, kms, mins, r)
-    }
-
-    private fun txt(size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
-        textSize = size
-        setTextColor(color)
-        if (bold) typeface = Typeface.DEFAULT_BOLD
-    }
-
-    private fun chip(): TextView = txt(13f, Color.WHITE, true).apply {
-        gravity = Gravity.CENTER
-        setPadding(dp(6), dp(8), dp(6), dp(8))
-        background = GradientDrawable().apply {
-            setColor(Color.parseColor("#1F2937"))
-            cornerRadius = dp(12).toFloat()
-        }
-    }
-
-    private fun lpm(top: Int) = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-    ).apply { topMargin = dp(top) }
-
-    private fun buildUi(): Ui {
-        val bg = GradientDrawable().apply {
-            setColor(Color.parseColor("#F2111827"))
-            cornerRadius = dp(20).toFloat()
-            setStroke(dp(2), Color.parseColor("#22C55E"))
-        }
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            minimumWidth = dp(300)
-            background = bg
-        }
-        val verdict = txt(18f, Color.WHITE, true)
-        val pay = txt(32f, Color.WHITE, true)
-        val sub = txt(13f, Color.parseColor("#9CA3AF"))
-        val net = chip()
-        val km = chip()
-        val hour = chip()
-        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        chips.addView(net, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
-        chips.addView(km, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
-        chips.addView(hour, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val fails = txt(12f, Color.parseColor("#FBBF24"), true)
-        val save = txt(15f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#2563EB"))
-                cornerRadius = dp(12).toFloat()
-            }
-        }
-        save.setOnClickListener {
-            val c = cur ?: return@setOnClickListener
-            if (curSig == savedSig) return@setOnClickListener
-            val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-            val l = loadHist(prefs).toMutableList()
-            l.add(c)
-            saveHist(prefs, l.takeLast(500))
-            savedSig = curSig
-            save.text = "✓ Guardado en el historial"
-            save.alpha = 0.6f
-        }
-        box.addView(verdict)
-        box.addView(pay, lpm(2))
-        box.addView(sub, lpm(0))
-        box.addView(chips, lpm(10))
-        box.addView(fails, lpm(8))
-        box.addView(save, lpm(12))
-        return Ui(box, bg, verdict, pay, sub, net, km, hour, fails, save)
-    }
-
-    private fun show(p: Double, kms: Double, mins: Double, r: Eval) {
-        val u = ui ?: run {
-            val n = buildUi()
-            val lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(48) }
-            try { wm?.addView(n.box, lp) } catch (_: Exception) { return }
-            ui = n
-            n
-        }
-        val col = Color.parseColor(if (r.ok) "#22C55E" else "#EF4444")
-        u.bg.setStroke(dp(2), col)
-        u.verdict.text = if (r.ok) "✅ RENTABLE" else "❌ NO CONVIENE"
-        u.verdict.setTextColor(col)
-        u.pay.text = money(p)
-        u.sub.text = (if (kms > 0) "%.1f km".format(kms) else "km ?") + " · " +
-                (if (mins > 0) "${mins.toInt()} min" else "min ?")
-        u.net.text = "Neto\n" + money(r.net)
-        u.km.text = "Por km\n" + (if (kms > 0) money(r.perKm) else "–")
-        u.hour.text = "Por hora\n" + (if (mins > 0) money(r.perHour) else "–")
-        if (r.ok) {
-            u.fails.visibility = View.GONE
-        } else {
-            u.fails.visibility = View.VISIBLE
-            u.fails.text = "Falla: " + r.fails.joinToString(", ")
-        }
-        val saved = curSig == savedSig
-        u.save.text = if (saved) "✓ Guardado en el historial" else "＋ Lo acepté (guardar)"
-        u.save.alpha = if (saved) 0.6f else 1f
-    }
-
-      private fun diag(texts: List<String>) {
-        cur = null
-        val u = ui ?: run {
-            val n = buildUi()
-            val lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(48) }
-            try { wm?.addView(n.box, lp) } catch (_: Exception) { return }
-            ui = n
-            n
-        }
-        val amber = Color.parseColor("#FBBF24")
-        u.bg.setStroke(dp(2), amber)
-        u.verdict.text = "🔍 No encuentro el pago"
-        u.verdict.setTextColor(amber)
-        u.pay.text = "${texts.size} textos leídos"
-        u.sub.text = texts.take(12).joinToString(" | ").take(350)
-        u.net.text = "–"
-        u.km.text = "–"
-        u.hour.text = "–"
-        u.fails.visibility = View.GONE
-        u.save.text = "Sacá captura y mandásela a Claude"
-        u.save.alpha = 0.6f
-      }  private fun hide() {
-        ui?.let { try { wm?.removeView(it.box) } catch (_: Exception) {} }
-        ui = null
-        cur = null
-        savedSig = ""
-    }
-
-    override fun onInterrupt() { hide() }
-    override fun onDestroy() { hide(); super.onDestroy() }
 }
